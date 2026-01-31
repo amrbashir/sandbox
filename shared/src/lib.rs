@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::path::PathBuf;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -18,13 +19,9 @@ pub fn inject_dll_into_process(target: Process) -> windows::core::Result<()> {
     let is_host_64_bit = host.is_64_bit()?;
     let is_target_64_bit = target.is_64_bit()?;
 
-    println!(
-        "[INJECT] Host 64-bit: {}, Target 64-bit: {}",
-        is_host_64_bit, is_target_64_bit
-    );
-
     if is_host_64_bit == is_target_64_bit {
-        inject_dll(*target, is_target_64_bit)?;
+        println!("[INJECT] Using direct injection for same-bitness injection");
+        inject_dll(*target, is_target_64_bit, true)?;
     } else {
         println!("[INJECT] Using pipe for cross-bitness injection");
         inject_via_pipe(target.pid())?;
@@ -38,13 +35,9 @@ pub async fn inject_dll_into_process_async(target: Process) -> windows::core::Re
     let is_host_64_bit = host.is_64_bit()?;
     let is_target_64_bit = target.is_64_bit()?;
 
-    println!(
-        "[INJECT] Host 64-bit: {}, Target 64-bit: {}",
-        is_host_64_bit, is_target_64_bit
-    );
-
     if is_host_64_bit == is_target_64_bit {
-        inject_dll(*target, is_target_64_bit)?;
+        println!("[INJECT] Using direct injection for same-bitness injection");
+        inject_dll(*target, is_target_64_bit, true)?;
     } else {
         println!("[INJECT] Using pipe for cross-bitness injection");
         inject_via_pipe_async(target.pid()).await?;
@@ -63,70 +56,67 @@ fn inject_via_pipe(pid: u32) -> std::io::Result<()> {
 }
 
 async fn inject_via_pipe_async(pid: u32) -> std::io::Result<()> {
-    println!("[PIPE] Connecting to pipe for PID {pid}",);
-    let mut client = ClientOptions::new().open(PIPE_NAME)?;
+    let mut attempt = 0;
 
-    println!("[PIPE] Sending inject request for PID {pid}");
-    let pid_bytes = pid.to_le_bytes();
-    client.write_all(&pid_bytes).await.map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Pipe write failed: {}", e),
-        )
-    })?;
-    client.flush().await.map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Pipe flush failed: {}", e),
-        )
-    })?;
+    loop {
+        let Ok(mut client) = ClientOptions::new().open(PIPE_NAME) else {
+            attempt += 1;
+            if attempt >= 5 {
+                let err = format!("Failed to open pipe {PIPE_NAME}");
+                println!("[INJECT] {err}");
+                return Err(std::io::Error::other(err));
+            }
 
-    println!("[PIPE] Waiting for response");
-    let mut resp = [0u8; 1];
-    client.read_exact(&mut resp).await.map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Pipe read failed: {}", e),
-        )
-    })?;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        };
 
-    if resp[0] != 0 {
-        let err = format!("Injection failed with status code {}", resp[0]);
-        return Err(std::io::Error::other(err));
+        println!("[INJECT] Connected to pipe {PIPE_NAME}");
+        println!("[INJECT] Sending PID {pid} for injection...");
+
+        let pid_bytes = pid.to_le_bytes();
+        client.write_all(&pid_bytes).await?;
+        client.flush().await?;
+
+        println!("[INJECT] Waiting for injection response...");
+        let mut resp = [0u8; 1];
+        client.read_exact(&mut resp).await?;
+
+        println!("[INJECT] Received injection response: {}", resp[0]);
+        if resp[0] != 0 {
+            let err = format!("Injection failed with status code {}", resp[0]);
+            return Err(std::io::Error::other(err));
+        }
+
+        break;
     }
-    println!("[PIPE] Injection completed successfully");
 
     Ok(())
 }
 
-pub fn inject_dll(process: HANDLE, is_64_bit: bool) -> windows::core::Result<()> {
-    let current_exe = std::env::current_exe()?;
-    let current_exe_dir = current_exe.parent().unwrap();
+pub fn inject_dll(process: HANDLE, is_64_bit: bool, verbose: bool) -> windows::core::Result<()> {
+    let current_module = get_current_module_path()?;
+    let current_module_dir = current_module.parent().unwrap();
 
     let dll_path = if is_64_bit {
-        current_exe_dir.join("sandbox_hooks_64.dll")
+        current_module_dir.join("sandbox_hooks_64.dll")
     } else {
-        current_exe_dir.join("sandbox_hooks_32.dll")
+        current_module_dir.join("sandbox_hooks_32.dll")
     };
 
-    println!("[INJECT] Current exe: {}", current_exe.display());
-    println!("[INJECT] DLL path: {}", dll_path.display());
-    println!("[INJECT] DLL exists: {}", dll_path.exists());
-
-    if !dll_path.exists() {
-        println!("[INJECT] DLL not found!");
-        return Err(E_FAIL.into());
+    if verbose {
+        println!("[INJECT] Injecting DLL: {}", dll_path.display());
     }
 
     unsafe {
+        let pid = GetProcessId(process);
+        let injection_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid)?;
+
         let dll_path_wide = encode_wide(dll_path.to_str().unwrap());
         let dll_path_size = dll_path_wide.len() * std::mem::size_of::<u16>();
 
-        let bitness = if is_64_bit { "64-bit" } else { "32-bit" };
-        println!("[INJECT] Injecting DLL ({bitness}): {}", dll_path.display());
-
         let remote_mem = VirtualAllocEx(
-            process,
+            injection_handle,
             None,
             dll_path_size,
             MEM_COMMIT | MEM_RESERVE,
@@ -134,28 +124,38 @@ pub fn inject_dll(process: HANDLE, is_64_bit: bool) -> windows::core::Result<()>
         );
 
         if remote_mem.is_null() {
-            println!("[INJECT] Failed to allocate memory in target process");
+            if verbose {
+                let err = GetLastError();
+                println!("[INJECT] VirtualAllocEx failed: {:?}", err);
+            }
+
+            CloseHandle(injection_handle)?;
             return Err(E_FAIL.into());
         }
 
-        println!("[INJECT] Allocated memory at {remote_mem:?}");
-
         let mut bytes_written = 0;
-        WriteProcessMemory(
-            process,
+        if let Err(e) = WriteProcessMemory(
+            injection_handle,
             remote_mem,
             dll_path_wide.as_ptr() as *const _,
             dll_path_size,
             Some(&mut bytes_written),
-        )?;
+        ) {
+            if verbose {
+                println!("[INJECT] WriteProcessMemory failed: {:?}", e);
+            }
+
+            VirtualFreeEx(injection_handle, remote_mem, 0, MEM_RELEASE)?;
+            CloseHandle(injection_handle)?;
+            return Err(E_FAIL.into());
+        }
 
         let h_kernel32 = GetModuleHandleW(w!("kernel32.dll"))?;
         let load_library_addr = GetProcAddress(h_kernel32, s!("LoadLibraryW"));
 
         if let Some(load_library) = load_library_addr {
-            println!("[INJECT] Loading the DLL via LoadLibraryW in remote process");
             let h_thread = CreateRemoteThread(
-                process,
+                injection_handle,
                 None,
                 0,
                 Some(std::mem::transmute(load_library)),
@@ -163,21 +163,42 @@ pub fn inject_dll(process: HANDLE, is_64_bit: bool) -> windows::core::Result<()>
                 0,
                 None,
             )?;
-
-            println!("[INJECT] Waiting for LoadLibraryW to complete");
             WaitForSingleObject(h_thread, INFINITE);
-
-            println!("[INJECT] DLL injected successfully");
             CloseHandle(h_thread)?;
         } else {
-            VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE)?;
+            if verbose {
+                let err = GetLastError();
+                println!("[INJECT] GetProcAddress(LoadLibraryW) failed: {:?}", err);
+            }
+
+            VirtualFreeEx(injection_handle, remote_mem, 0, MEM_RELEASE)?;
+            CloseHandle(injection_handle)?;
             return Err(E_FAIL.into());
         }
 
-        VirtualFreeEx(process, remote_mem, 0, MEM_RELEASE)?;
+        VirtualFreeEx(injection_handle, remote_mem, 0, MEM_RELEASE)?;
+        CloseHandle(injection_handle)?;
     }
 
     Ok(())
+}
+
+#[unsafe(no_mangle)]
+fn get_current_module_path() -> windows::core::Result<PathBuf> {
+    unsafe {
+        let mut module_handle = HMODULE::default();
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            w!("get_current_module_path"),
+            &mut module_handle,
+        )?;
+
+        let mut path_buf = vec![0u16; 260];
+        GetModuleFileNameW(Some(module_handle), &mut path_buf);
+
+        let path = String::from_utf16_lossy(&path_buf);
+        Ok(PathBuf::from(path))
+    }
 }
 
 pub struct Process {
