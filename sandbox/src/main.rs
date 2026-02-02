@@ -3,13 +3,8 @@ use windows::Win32::System::JobObjects::*;
 use windows::Win32::System::Threading::*;
 use windows::core::PWSTR;
 
-mod daemon;
-
 #[tokio::main]
 pub async fn main() -> windows::core::Result<()> {
-    // Start injector pipe server thread
-    let _daemon = daemon::start();
-
     println!("[HOST] Starting sandbox...");
 
     println!("[HOST] Creating job object...");
@@ -66,7 +61,7 @@ pub async fn main() -> windows::core::Result<()> {
     unsafe { AssignProcessToJobObject(h_job, pi.hProcess)? };
 
     let process = shared::Process::from_raw_handle(pi.hProcess);
-    shared::inject_dll_into_process_async(process).await?;
+    shared::inject_dll(process)?;
 
     println!("[HOST] Resuming process thread...");
     unsafe { ResumeThread(pi.hThread) };

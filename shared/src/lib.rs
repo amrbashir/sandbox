@@ -1,9 +1,6 @@
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::ClientOptions;
-
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::LibraryLoader::*;
@@ -14,102 +11,20 @@ use windows::core::BOOL;
 use windows::core::PWSTR;
 use windows::core::{s, w};
 
-pub fn inject_dll_into_process(target: Process) -> windows::core::Result<()> {
-    let host = Process::current();
-    let is_host_64_bit = host.is_64_bit()?;
-    let is_target_64_bit = target.is_64_bit()?;
-
-    if is_host_64_bit == is_target_64_bit {
-        println!("[INJECT] Using direct injection for same-bitness injection");
-        inject_dll(*target, is_target_64_bit, true)?;
-    } else {
-        println!("[INJECT] Using pipe for cross-bitness injection");
-        inject_via_pipe(target.pid())?;
-    }
-
-    Ok(())
-}
-
-pub async fn inject_dll_into_process_async(target: Process) -> windows::core::Result<()> {
-    let host = Process::current();
-    let is_host_64_bit = host.is_64_bit()?;
-    let is_target_64_bit = target.is_64_bit()?;
-
-    if is_host_64_bit == is_target_64_bit {
-        println!("[INJECT] Using direct injection for same-bitness injection");
-        inject_dll(*target, is_target_64_bit, true)?;
-    } else {
-        println!("[INJECT] Using pipe for cross-bitness injection");
-        inject_via_pipe_async(target.pid()).await?;
-    }
-
-    Ok(())
-}
-
-pub const PIPE_NAME: &str = r"\\.\pipe\sandbox_inject";
-
-fn inject_via_pipe(pid: u32) -> std::io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(async { inject_via_pipe_async(pid).await })
-}
-
-async fn inject_via_pipe_async(pid: u32) -> std::io::Result<()> {
-    let mut attempt = 0;
-
-    loop {
-        let Ok(mut client) = ClientOptions::new().open(PIPE_NAME) else {
-            attempt += 1;
-            if attempt >= 5 {
-                let err = format!("Failed to open pipe {PIPE_NAME}");
-                println!("[INJECT] {err}");
-                return Err(std::io::Error::other(err));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            continue;
-        };
-
-        println!("[INJECT] Connected to pipe {PIPE_NAME}");
-        println!("[INJECT] Sending PID {pid} for injection...");
-
-        let pid_bytes = pid.to_le_bytes();
-        client.write_all(&pid_bytes).await?;
-        client.flush().await?;
-
-        println!("[INJECT] Waiting for injection response...");
-        let mut resp = [0u8; 1];
-        client.read_exact(&mut resp).await?;
-
-        println!("[INJECT] Received injection response: {}", resp[0]);
-        if resp[0] != 0 {
-            let err = format!("Injection failed with status code {}", resp[0]);
-            return Err(std::io::Error::other(err));
-        }
-
-        break;
-    }
-
-    Ok(())
-}
-
-pub fn inject_dll(process: HANDLE, is_64_bit: bool, verbose: bool) -> windows::core::Result<()> {
+pub fn inject_dll(process: Process) -> windows::core::Result<()> {
     let current_module = get_current_module_path()?;
     let current_module_dir = current_module.parent().unwrap();
 
-    let dll_path = if is_64_bit {
+    let dll_path = if process.is_64_bit()? {
         current_module_dir.join("sandbox_hooks_64.dll")
     } else {
         current_module_dir.join("sandbox_hooks_32.dll")
     };
 
-    if verbose {
-        println!("[INJECT] Injecting DLL: {}", dll_path.display());
-    }
+    println!("[INJECT] Injecting DLL: {}", dll_path.display());
 
     unsafe {
-        let pid = GetProcessId(process);
+        let pid = GetProcessId(*process);
         let injection_handle = OpenProcess(PROCESS_ALL_ACCESS, false, pid)?;
 
         let dll_path_wide = encode_wide(dll_path.to_str().unwrap());
@@ -124,10 +39,8 @@ pub fn inject_dll(process: HANDLE, is_64_bit: bool, verbose: bool) -> windows::c
         );
 
         if remote_mem.is_null() {
-            if verbose {
-                let err = GetLastError();
-                println!("[INJECT] VirtualAllocEx failed: {:?}", err);
-            }
+            let err = GetLastError();
+            println!("[INJECT] VirtualAllocEx failed: {:?}", err);
 
             CloseHandle(injection_handle)?;
             return Err(E_FAIL.into());
@@ -141,9 +54,7 @@ pub fn inject_dll(process: HANDLE, is_64_bit: bool, verbose: bool) -> windows::c
             dll_path_size,
             Some(&mut bytes_written),
         ) {
-            if verbose {
-                println!("[INJECT] WriteProcessMemory failed: {:?}", e);
-            }
+            println!("[INJECT] WriteProcessMemory failed: {:?}", e);
 
             VirtualFreeEx(injection_handle, remote_mem, 0, MEM_RELEASE)?;
             CloseHandle(injection_handle)?;
@@ -166,10 +77,8 @@ pub fn inject_dll(process: HANDLE, is_64_bit: bool, verbose: bool) -> windows::c
             WaitForSingleObject(h_thread, INFINITE);
             CloseHandle(h_thread)?;
         } else {
-            if verbose {
-                let err = GetLastError();
-                println!("[INJECT] GetProcAddress(LoadLibraryW) failed: {:?}", err);
-            }
+            let err = GetLastError();
+            println!("[INJECT] GetProcAddress(LoadLibraryW) failed: {:?}", err);
 
             VirtualFreeEx(injection_handle, remote_mem, 0, MEM_RELEASE)?;
             CloseHandle(injection_handle)?;

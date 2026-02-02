@@ -1,16 +1,13 @@
-$SANDBOX_DIR = "$env:CARGO_TARGET_DIR/debug"
-$X64_DIR = "$env:CARGO_TARGET_DIR/x86_64-pc-windows-msvc/debug"
-$X32_DIR = "$env:CARGO_TARGET_DIR/i686-pc-windows-msvc/debug"
+$SANDBOX_DIR = "C:\Users\amr\.cache\.cargo-target\debug"
+$X64_DIR = "C:\Users\amr\.cache\.cargo-target\x86_64-pc-windows-msvc\debug"
+$X32_DIR = "C:\Users\amr\.cache\.cargo-target\i686-pc-windows-msvc\debug"
 
-# Build the sandbox hooks DLLs
 cargo build -p sandbox_hooks --target x86_64-pc-windows-msvc
 cargo build -p sandbox_hooks --target i686-pc-windows-msvc
 
-# Move the built DLLs to the sandbox directory
 Move-Item "$X64_DIR/sandbox_hooks.dll" "$SANDBOX_DIR/sandbox_hooks_64.dll" -Force
 Move-Item "$X32_DIR/sandbox_hooks.dll" "$SANDBOX_DIR/sandbox_hooks_32.dll" -Force
 
-# for UWP apps to be able to load the DLL, we need to give them read & execute permissions
 icacls "$SANDBOX_DIR/sandbox_hooks_64.dll" /grant everyone:RX
 icacls "$SANDBOX_DIR/sandbox_hooks_64.dll" /grant *S-1-15-2-1:RX
 icacls "$SANDBOX_DIR/sandbox_hooks_64.dll" /grant *S-1-15-2-2:RX

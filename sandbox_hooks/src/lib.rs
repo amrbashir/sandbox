@@ -113,7 +113,7 @@ extern "system" fn CreateProcessInternalW_tour(
     processAttributes: *mut c_void,
     threadAttributes: *mut c_void,
     inheritHandles: BOOL,
-    mut creationFlags: u32,
+    creationFlags: u32,
     environment: *mut c_void,
     currentDirectory: *const u16,
     startupInfo: *mut STARTUPINFOW,
@@ -121,12 +121,6 @@ extern "system" fn CreateProcessInternalW_tour(
     restrictedUserToken: *mut c_void,
 ) -> BOOL {
     println!("[HOOK:CreateProcessInternalW] intercepted");
-
-    // Ensure CREATE_SUSPENDED is set so we can inject before the process runs
-    let has_suspended = (creationFlags & CREATE_SUSPENDED.0) != 0;
-    if !has_suspended {
-        creationFlags |= CREATE_SUSPENDED.0
-    };
 
     // Call the original CreateProcessInternalW
     let result = unsafe {
@@ -156,15 +150,14 @@ extern "system" fn CreateProcessInternalW_tour(
         let exe_path = process.exe_path().unwrap_or_default();
 
         println!("[HOOK:CreateProcessInternalW] Injecting hooks into child process:  {exe_path}");
-        if let Err(e) = shared::inject_dll_into_process(process) {
+        if let Err(e) = shared::inject_dll(process) {
             println!("[HOOK:CreateProcessInternalW] Failed to inject into child process: {e:?}");
             let _ = unsafe { TerminateProcess(hprocess, 1) };
             return BOOL(0);
         }
 
-        // Resume the main thread so the child can run
-        // only if we suspended it ourselves
-        if !has_suspended {
+        // Resume the main thread if it wasn't created suspended
+        if creationFlags & CREATE_SUSPENDED.0 == 0 {
             unsafe { ResumeThread(thread) };
         }
     }
