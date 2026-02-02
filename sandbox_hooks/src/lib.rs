@@ -4,6 +4,7 @@
 use minhook_detours::*;
 use std::ffi::c_void;
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::Foundation::NTSTATUS;
 use windows::Win32::Foundation::STATUS_ACCESS_DENIED;
 use windows::Win32::Foundation::UNICODE_STRING;
@@ -13,6 +14,8 @@ use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::IO::PIO_APC_ROUTINE;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::LibraryLoader::GetProcAddress;
+use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows::Win32::System::SystemServices::DLL_PROCESS_DETACH;
 use windows::Win32::System::Threading::CREATE_SUSPENDED;
 use windows::Win32::System::Threading::TerminateProcess;
 use windows::Win32::System::Threading::{PROCESS_INFORMATION, ResumeThread, STARTUPINFOW};
@@ -150,7 +153,7 @@ extern "system" fn CreateProcessInternalW_tour(
         let exe_path = process.exe_path().unwrap_or_default();
 
         println!("[HOOK:CreateProcessInternalW] Injecting hooks into child process:  {exe_path}");
-        if let Err(e) = shared::inject_dll(process) {
+        if let Err(e) = shared::inject_dll(process, unsafe { G_HINST_DLL }) {
             println!("[HOOK:CreateProcessInternalW] Failed to inject into child process: {e:?}");
             let _ = unsafe { TerminateProcess(hprocess, 1) };
             return BOOL(0);
@@ -193,8 +196,20 @@ macro_rules! install_hook {
     };
 }
 
-#[ctor::ctor]
-fn init_hook() {
+fn uninit_hooks() {
+    println!("[UNINIT] Uninitializing sandbox hooks...");
+
+    unsafe {
+        if MH_Uninitialize() != MH_OK {
+            println!("[UNINIT] WARNING: MinHook uninitialization failed");
+            return;
+        }
+    }
+
+    println!("[UNINIT] Sandbox hooks uninitialized successfully");
+}
+
+fn init_hooks() {
     println!("[INIT] Initializing sandbox hooks...");
 
     unsafe {
@@ -219,16 +234,19 @@ fn init_hook() {
     println!("[INIT] All hooks initialized successfully");
 }
 
-#[ctor::dtor]
-fn uninit_hook() {
-    println!("[UNINIT] Uninitializing sandbox hooks...");
+static mut G_HINST_DLL: HINSTANCE = HINSTANCE(0 as _);
 
-    unsafe {
-        if MH_Uninitialize() != MH_OK {
-            println!("[UNINIT] WARNING: MinHook uninitialization failed");
-            return;
+#[unsafe(no_mangle)]
+#[allow(non_snake_case, unused_variables)]
+extern "system" fn DllMain(hinstDLL: HINSTANCE, fdw_reason: u32, _lpv_reserved: *mut ()) -> bool {
+    match fdw_reason {
+        DLL_PROCESS_ATTACH => {
+            unsafe { G_HINST_DLL = hinstDLL };
+            init_hooks()
         }
+        DLL_PROCESS_DETACH => uninit_hooks(),
+        _ => (),
     }
 
-    println!("[UNINIT] Sandbox hooks uninitialized successfully");
+    true
 }

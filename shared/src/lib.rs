@@ -11,8 +11,8 @@ use windows::core::BOOL;
 use windows::core::PWSTR;
 use windows::core::{s, w};
 
-pub fn inject_dll(process: Process) -> windows::core::Result<()> {
-    let current_module = get_current_module_path()?;
+pub fn inject_dll(process: Process, hinstance: HINSTANCE) -> windows::core::Result<()> {
+    let current_module = get_current_module_path(hinstance)?;
     let current_module_dir = current_module.parent().unwrap();
 
     let dll_path = if process.is_64_bit()? {
@@ -93,17 +93,10 @@ pub fn inject_dll(process: Process) -> windows::core::Result<()> {
 }
 
 #[unsafe(no_mangle)]
-fn get_current_module_path() -> windows::core::Result<PathBuf> {
+fn get_current_module_path(hinstance: HINSTANCE) -> windows::core::Result<PathBuf> {
     unsafe {
-        let mut module_handle = HMODULE::default();
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            w!("get_current_module_path"),
-            &mut module_handle,
-        )?;
-
         let mut path_buf = vec![0u16; 260];
-        GetModuleFileNameW(Some(module_handle), &mut path_buf);
+        GetModuleFileNameW(Some(HMODULE(hinstance.0)), &mut path_buf);
 
         let path = String::from_utf16_lossy(&path_buf);
         Ok(PathBuf::from(path))

@@ -283,7 +283,6 @@ dependencies = [
 name = "sandbox_hooks"
 version = "0.0.0"
 dependencies = [
- "ctor",
  "minhook-detours",
  "shared",
  "windows",

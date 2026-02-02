@@ -1,5 +1,6 @@
 use windows::Win32::Foundation::*;
 use windows::Win32::System::JobObjects::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
 use windows::core::PWSTR;
 
@@ -61,7 +62,8 @@ pub async fn main() -> windows::core::Result<()> {
     unsafe { AssignProcessToJobObject(h_job, pi.hProcess)? };
 
     let process = shared::Process::from_raw_handle(pi.hProcess);
-    shared::inject_dll(process)?;
+    let hinstance = unsafe { GetModuleHandleW(None)? };
+    shared::inject_dll(process, HINSTANCE(hinstance.0))?;
 
     println!("[HOST] Resuming process thread...");
     unsafe { ResumeThread(pi.hThread) };
