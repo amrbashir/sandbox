@@ -1,6 +1,11 @@
-$SANDBOX_DIR = "C:\Users\amr\.cache\.cargo-target\debug"
-$X64_DIR = "C:\Users\amr\.cache\.cargo-target\x86_64-pc-windows-msvc\debug"
-$X32_DIR = "C:\Users\amr\.cache\.cargo-target\i686-pc-windows-msvc\debug"
+$targetDir = $env:CARGO_TARGET_DIR
+if (-not $targetDir) {
+    $targetDir = Join-Path $PSScriptRoot "target"
+}
+
+$SANDBOX_DIR = Join-Path $targetDir "debug"
+$X64_DIR = Join-Path $targetDir "x86_64-pc-windows-msvc\debug"
+$X32_DIR = Join-Path $targetDir "i686-pc-windows-msvc\debug"
 
 cargo build -p sandbox_hooks --target x86_64-pc-windows-msvc
 cargo build -p sandbox_hooks --target i686-pc-windows-msvc
@@ -16,9 +21,9 @@ icacls "$SANDBOX_DIR/sandbox_hooks_32.dll" /grant *S-1-15-2-1:RX
 icacls "$SANDBOX_DIR/sandbox_hooks_32.dll" /grant *S-1-15-2-2:RX
 
 # Run the sandbox
-# cargo run --bin sandbox -- "C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
-# cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
-# cargo run --bin sandbox -- "C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
-# cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
-# cargo run --bin sandbox -- "notepad.exe ./test/secret.txt"
-cargo run --bin sandbox -- "pwsh.exe"
+# cargo run --bin sandbox -- coreutils.exe cat ./test/secret.txt
+# cargo run --bin sandbox -- powershell.exe -Command  coreutils.exe cat ./test/secret.txt
+# cargo run --bin sandbox -- cat.exe ./test/secret.txt
+# cargo run --bin sandbox -- powershell.exe -Command cat.exe ./test/secret.txt
+# cargo run --bin sandbox -- notepad.exe ./test/secret.txt
+cargo run --bin sandbox -- pwsh.exe
