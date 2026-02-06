@@ -16,9 +16,9 @@ icacls "$SANDBOX_DIR/sandbox_hooks_32.dll" /grant *S-1-15-2-1:RX
 icacls "$SANDBOX_DIR/sandbox_hooks_32.dll" /grant *S-1-15-2-2:RX
 
 # Run the sandbox
-cargo run --bin sandbox -- "C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
-cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
-cargo run --bin sandbox -- "C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
-cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
+# cargo run --bin sandbox -- "C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
+# cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\apps\uutils-coreutils\current\coreutils.exe cat ./test/secret.txt"
+# cargo run --bin sandbox -- "C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
+# cargo run --bin sandbox -- "powershell.exe -Command  C:\Users\amr\scoop\shims\cat.exe ./test/secret.txt"
 # cargo run --bin sandbox -- "notepad.exe ./test/secret.txt"
-# cargo run --bin sandbox -- "pwsh.exe"
+cargo run --bin sandbox -- "pwsh.exe"
