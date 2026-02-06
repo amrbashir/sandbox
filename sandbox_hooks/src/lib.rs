@@ -171,12 +171,7 @@ macro_rules! install_hook {
 }
 
 fn uninit_hooks() {
-    unsafe {
-        if MH_Uninitialize() != MH_OK {
-            eprintln!("[UNINIT] MinHook uninitialization failed");
-            return;
-        }
-    }
+    unsafe { MH_Uninitialize() };
 }
 
 fn init_hooks() {
