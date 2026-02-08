@@ -4,16 +4,28 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::{ChildExt, CommandExt};
 use std::process::Command;
 
+use clap::Parser;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::JobObjects::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::*;
 
+#[derive(Parser, Debug)]
+#[command(name = "sandbox")]
+#[command(about = "Run commands in a sandboxed environment with file access restrictions")]
+#[command(trailing_var_arg = true)]
+struct Args {
+    /// The command to run in the sandbox (including all arguments)
+    #[arg(trailing_var_arg = true, required = true)]
+    command: Vec<String>,
+}
+
 fn main() -> windows::core::Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() < 1 {
+    let args = Args::parse();
+
+    if args.command.is_empty() {
         eprintln!("[SANDBOX] Please provide a command to run in the sandbox.");
-        return Ok(());
+        std::process::exit(1);
     }
 
     eprintln!("[SANDBOX] Starting...");
@@ -38,8 +50,8 @@ fn main() -> windows::core::Result<()> {
     }
 
     eprintln!("[SANDBOX] Creating process...");
-    let mut child = Command::new(&args[0])
-        .args(&args[1..])
+    let mut child = Command::new(&args.command[0])
+        .args(&args.command[1..])
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .creation_flags(CREATE_SUSPENDED.0)

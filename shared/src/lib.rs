@@ -5,12 +5,12 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use windows::core::PWSTR;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Win32::Foundation::*;
-use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED};
+use windows::Win32::Storage::FileSystem::{FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW};
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::System::Threading::*;
+use windows::core::PWSTR;
 
 pub const PROTECTED_PATH: &str = r"test\secret.txt";
 
