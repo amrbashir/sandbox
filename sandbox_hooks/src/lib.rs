@@ -3,6 +3,7 @@
 
 use minhook_detours::*;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::FILE_BASIC_INFORMATION;
 use windows::Wdk::Storage::FileSystem::FILE_NETWORK_OPEN_INFORMATION;
@@ -19,6 +20,7 @@ use windows::Win32::System::LibraryLoader::GetProcAddress;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::Win32::System::SystemServices::DLL_PROCESS_DETACH;
 use windows::Win32::System::Threading::CREATE_SUSPENDED;
+use windows::Win32::System::Threading::GetProcessId;
 use windows::Win32::System::Threading::TerminateProcess;
 use windows::Win32::System::Threading::{PROCESS_INFORMATION, ResumeThread, STARTUPINFOW};
 use windows::core::BOOL;
@@ -66,34 +68,6 @@ type NTOPENFILE = extern "system" fn(
     iostatusblock: *mut IO_STATUS_BLOCK,
     shareaccess: u32,
     openoptions: u32,
-) -> NTSTATUS;
-
-type NTCREATENAMEDPIPEFILE = extern "system" fn(
-    filehandle: *mut HANDLE,
-    desiredaccess: u32,
-    objectattributes: *mut OBJECT_ATTRIBUTES,
-    iostatusblock: *mut IO_STATUS_BLOCK,
-    shareaccess: u32,
-    createdisposition: u32,
-    createoptions: u32,
-    namedpipetype: u32,
-    readmodemode: u32,
-    completionmode: u32,
-    maximuminstances: u32,
-    inboundquota: u32,
-    outboundquota: u32,
-    defaulttimeout: *const i64,
-) -> NTSTATUS;
-
-type NTCREATEMAILSLOTFILE = extern "system" fn(
-    filehandle: *mut HANDLE,
-    desiredaccess: u32,
-    objectattributes: *mut OBJECT_ATTRIBUTES,
-    iostatusblock: *mut IO_STATUS_BLOCK,
-    createoptions: u32,
-    mailslotquota: u32,
-    maxmessagesize: u32,
-    readtimeout: *const i64,
 ) -> NTSTATUS;
 
 // --- Symbolic Link Operations ---
@@ -209,8 +183,6 @@ type NTDELETEFILE = extern "system" fn(objectattributes: *mut OBJECT_ATTRIBUTES)
 
 static mut pOriginalNtCreateFile: NTCREATEFILE = NtCreateFile_tour;
 static mut pOriginalNtOpenFile: NTOPENFILE = NtOpenFile_tour;
-static mut pOriginalNtCreateNamedPipeFile: NTCREATENAMEDPIPEFILE = NtCreateNamedPipeFile_tour;
-static mut pOriginalNtCreateMailslotFile: NTCREATEMAILSLOTFILE = NtCreateMailslotFile_tour;
 static mut pOriginalNtCreateSymbolicLinkObject: NTCREATESYMBOLICLINKOBJECT =
     NtCreateSymbolicLinkObject_tour;
 static mut pOriginalNtOpenSymbolicLinkObject: NTOPENSYMBOLICLINKOBJECT =
@@ -270,10 +242,22 @@ extern "system" fn CreateProcessInternalW_tour(
     if result.as_bool() && !processInformation.is_null() {
         let pi = unsafe { &*processInformation };
         let hprocess = pi.hProcess;
-        let thread = pi.hThread;
+        let hthread = pi.hThread;
 
-        let process = shared::Process::from_raw_handle(hprocess);
-        if let Err(e) = shared::inject_dll(process, unsafe { G_HINST_DLL }) {
+        // Propagate deny config to child process BEFORE injection
+        let deny = shared::get_denied_paths();
+        let deny = deny.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+        let child_id = unsafe { GetProcessId(hprocess) };
+        if let Err(e) = shared::create_deny_config(child_id, &deny) {
+            eprintln!(
+                "[HOOK:CreateProcessInternalW] Failed to create deny config for child: {e:?}"
+            );
+            let _ = unsafe { TerminateProcess(hprocess, 1) };
+            return BOOL(0);
+        }
+
+        if let Err(e) = shared::inject_dll(hprocess, unsafe { G_HINST_DLL }) {
             eprintln!("[HOOK:CreateProcessInternalW] Failed to inject into child process: {e:?}");
             eprintln!("[HOOK:CreateProcessInternalW] Terminating child process...");
             let _ = unsafe { TerminateProcess(hprocess, 1) };
@@ -281,7 +265,7 @@ extern "system" fn CreateProcessInternalW_tour(
         }
 
         if creationFlags & CREATE_SUSPENDED.0 == 0 {
-            unsafe { ResumeThread(thread) };
+            unsafe { ResumeThread(hthread) };
         }
     }
 
@@ -304,7 +288,8 @@ extern "system" fn NtCreateFile_tour(
     ealength: u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtCreateFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtCreateFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
     unsafe {
@@ -333,7 +318,8 @@ extern "system" fn NtOpenFile_tour(
     openoptions: u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtOpenFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtOpenFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
     unsafe {
@@ -348,74 +334,6 @@ extern "system" fn NtOpenFile_tour(
     }
 }
 
-extern "system" fn NtCreateNamedPipeFile_tour(
-    filehandle: *mut HANDLE,
-    desiredaccess: u32,
-    objectattributes: *mut OBJECT_ATTRIBUTES,
-    iostatusblock: *mut IO_STATUS_BLOCK,
-    shareaccess: u32,
-    createdisposition: u32,
-    createoptions: u32,
-    namedpipetype: u32,
-    readmodemode: u32,
-    completionmode: u32,
-    maximuminstances: u32,
-    inboundquota: u32,
-    outboundquota: u32,
-    defaulttimeout: *const i64,
-) -> NTSTATUS {
-    let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtCreateNamedPipeFile") {
-        return STATUS_ACCESS_DENIED;
-    }
-    unsafe {
-        pOriginalNtCreateNamedPipeFile(
-            filehandle,
-            desiredaccess,
-            objectattributes,
-            iostatusblock,
-            shareaccess,
-            createdisposition,
-            createoptions,
-            namedpipetype,
-            readmodemode,
-            completionmode,
-            maximuminstances,
-            inboundquota,
-            outboundquota,
-            defaulttimeout,
-        )
-    }
-}
-
-extern "system" fn NtCreateMailslotFile_tour(
-    filehandle: *mut HANDLE,
-    desiredaccess: u32,
-    objectattributes: *mut OBJECT_ATTRIBUTES,
-    iostatusblock: *mut IO_STATUS_BLOCK,
-    createoptions: u32,
-    mailslotquota: u32,
-    maxmessagesize: u32,
-    readtimeout: *const i64,
-) -> NTSTATUS {
-    let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtCreateMailslotFile") {
-        return STATUS_ACCESS_DENIED;
-    }
-    unsafe {
-        pOriginalNtCreateMailslotFile(
-            filehandle,
-            desiredaccess,
-            objectattributes,
-            iostatusblock,
-            createoptions,
-            mailslotquota,
-            maxmessagesize,
-            readtimeout,
-        )
-    }
-}
-
 // --- Symbolic Link Operations ---
 
 extern "system" fn NtCreateSymbolicLinkObject_tour(
@@ -425,9 +343,14 @@ extern "system" fn NtCreateSymbolicLinkObject_tour(
     linktarget: *const UNICODE_STRING,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtCreateSymbolicLinkObject") {
+    if shared::is_path_denied(&path) {
+        eprintln!(
+            "[HOOK:NtCreateSymbolicLinkObject] Denying access to {}",
+            path
+        );
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtCreateSymbolicLinkObject(linkhandle, desiredaccess, objectattributes, linktarget)
     }
@@ -439,9 +362,11 @@ extern "system" fn NtOpenSymbolicLinkObject_tour(
     objectattributes: *mut OBJECT_ATTRIBUTES,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtOpenSymbolicLinkObject") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtOpenSymbolicLinkObject] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe { pOriginalNtOpenSymbolicLinkObject(linkhandle, desiredaccess, objectattributes) }
 }
 
@@ -451,9 +376,14 @@ extern "system" fn NtQuerySymbolicLinkObject_tour(
     returnedlength: *mut u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(linkhandle);
-    if shared::check_and_deny(&path, "NtQuerySymbolicLinkObject") {
+    if shared::is_path_denied(&path) {
+        eprintln!(
+            "[HOOK:NtQuerySymbolicLinkObject] Denying access to {}",
+            path
+        );
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe { pOriginalNtQuerySymbolicLinkObject(linkhandle, linktarget, returnedlength) }
 }
 
@@ -471,9 +401,11 @@ extern "system" fn NtReadFile_tour(
     key: *const u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtReadFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtReadFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtReadFile(
             filehandle,
@@ -501,9 +433,11 @@ extern "system" fn NtReadFileScatter_tour(
     key: *const u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtReadFileScatter") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtReadFileScatter] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtReadFileScatter(
             filehandle,
@@ -533,9 +467,11 @@ extern "system" fn NtWriteFile_tour(
     key: *const u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtWriteFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtWriteFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtWriteFile(
             filehandle,
@@ -563,9 +499,11 @@ extern "system" fn NtWriteFileGather_tour(
     key: *const u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtWriteFileGather") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtWriteFileGather] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtWriteFileGather(
             filehandle,
@@ -591,9 +529,11 @@ extern "system" fn NtSetInformationFile_tour(
     fileinformationclass: u32,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtSetInformationFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtSetInformationFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtSetInformationFile(
             filehandle,
@@ -610,9 +550,11 @@ extern "system" fn NtQueryAttributesFile_tour(
     fileattributes: *mut FILE_BASIC_INFORMATION,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtQueryAttributesFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtQueryAttributesFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe { pOriginalNtQueryAttributesFile(objectattributes, fileattributes) }
 }
 
@@ -621,9 +563,14 @@ extern "system" fn NtQueryFullAttributesFile_tour(
     fileattributes: *mut FILE_NETWORK_OPEN_INFORMATION,
 ) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtQueryFullAttributesFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!(
+            "[HOOK:NtQueryFullAttributesFile] Denying access to {}",
+            path
+        );
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe { pOriginalNtQueryFullAttributesFile(objectattributes, fileattributes) }
 }
 
@@ -643,9 +590,11 @@ extern "system" fn NtQueryDirectoryFile_tour(
     restartscan: BOOL,
 ) -> NTSTATUS {
     let path = shared::get_path_from_handle(filehandle);
-    if shared::check_and_deny(&path, "NtQueryDirectoryFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtQueryDirectoryFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe {
         pOriginalNtQueryDirectoryFile(
             filehandle,
@@ -667,9 +616,11 @@ extern "system" fn NtQueryDirectoryFile_tour(
 
 extern "system" fn NtDeleteFile_tour(objectattributes: *mut OBJECT_ATTRIBUTES) -> NTSTATUS {
     let path = shared::get_path_from_object_attrs(objectattributes);
-    if shared::check_and_deny(&path, "NtDeleteFile") {
+    if shared::is_path_denied(&path) {
+        eprintln!("[HOOK:NtDeleteFile] Denying access to {}", path);
         return STATUS_ACCESS_DENIED;
     }
+
     unsafe { pOriginalNtDeleteFile(objectattributes) }
 }
 
@@ -720,18 +671,6 @@ fn init_hooks() {
             NtCreateFile_tour
         );
         install_hook!(h_ntdll, "NtOpenFile", pOriginalNtOpenFile, NtOpenFile_tour);
-        install_hook!(
-            h_ntdll,
-            "NtCreateNamedPipeFile",
-            pOriginalNtCreateNamedPipeFile,
-            NtCreateNamedPipeFile_tour
-        );
-        install_hook!(
-            h_ntdll,
-            "NtCreateMailslotFile",
-            pOriginalNtCreateMailslotFile,
-            NtCreateMailslotFile_tour
-        );
 
         // --- Symbolic Link Operations ---
         install_hook!(
@@ -826,6 +765,7 @@ extern "system" fn DllMain(hinstDLL: HINSTANCE, fdw_reason: u32, _lpv_reserved: 
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
             unsafe { G_HINST_DLL = hinstDLL };
+            shared::init_deny_config();
             init_hooks();
         }
         DLL_PROCESS_DETACH => {

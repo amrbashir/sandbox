@@ -2,6 +2,7 @@
 
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::{ChildExt, CommandExt};
+use std::path::PathBuf;
 use std::process::Command;
 
 use clap::Parser;
@@ -15,6 +16,10 @@ use windows::Win32::System::Threading::*;
 #[command(about = "Run commands in a sandboxed environment with file access restrictions")]
 #[command(trailing_var_arg = true)]
 struct Args {
+    /// Paths to deny access to (can be specified multiple times)
+    #[arg(long, value_name = "PATH")]
+    deny: Vec<PathBuf>,
+
     /// The command to run in the sandbox (including all arguments)
     #[arg(trailing_var_arg = true, required = true)]
     command: Vec<String>,
@@ -31,7 +36,7 @@ fn main() -> windows::core::Result<()> {
     eprintln!("[SANDBOX] Starting...");
 
     eprintln!("[SANDBOX] Creating job object...");
-    let h_job = unsafe { CreateJobObjectW(None, None)? };
+    let hjob = unsafe { CreateJobObjectW(None, None)? };
 
     // Configure job limits
     let mut info: JOBOBJECT_BASIC_LIMIT_INFORMATION = Default::default();
@@ -42,7 +47,7 @@ fn main() -> windows::core::Result<()> {
 
     unsafe {
         SetInformationJobObject(
-            h_job,
+            hjob,
             JobObjectExtendedLimitInformation,
             &extended as *const _ as *const _,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -57,26 +62,34 @@ fn main() -> windows::core::Result<()> {
         .creation_flags(CREATE_SUSPENDED.0)
         .spawn()?;
 
-    let h_process = HANDLE(child.as_raw_handle() as _);
-    let h_thread = HANDLE(child.main_thread_handle().as_raw_handle() as _);
+    let hprocess = HANDLE(child.as_raw_handle() as _);
+    let hthread = HANDLE(child.main_thread_handle().as_raw_handle() as _);
+
+    // Create shared memory with deny list before assigning to job
+    if !args.deny.is_empty() {
+        eprintln!("[SANDBOX] Creating deny list configuration...");
+        let deny = args.deny.iter().filter_map(|p| p.canonicalize().ok());
+        let deny = deny.collect::<Vec<_>>();
+        if !deny.is_empty() {
+            let _ = shared::create_deny_config(child.id(), &deny)?;
+        }
+    }
 
     eprintln!("[SANDBOX] Assigning to job object...");
-    unsafe { AssignProcessToJobObject(h_job, h_process)? };
+    unsafe { AssignProcessToJobObject(hjob, hprocess)? };
 
     eprintln!("[SANDBOX] Injecting DLL...");
-    let process = shared::Process::from_raw_handle(h_process);
     let hinstance = unsafe { GetModuleHandleW(None)? };
-    shared::inject_dll(process, HINSTANCE(hinstance.0))?;
+    shared::inject_dll(hprocess, HINSTANCE(hinstance.0))?;
 
     eprintln!("[SANDBOX] Resuming process thread...");
-    eprintln!(); // Blank line for readability
-    unsafe { ResumeThread(h_thread) };
+    unsafe { ResumeThread(hthread) };
 
     // Wait for process to exit
     child.wait()?;
 
     // Clean up job object
-    unsafe { CloseHandle(h_job)? };
+    unsafe { CloseHandle(hjob)? };
 
     Ok(())
 }

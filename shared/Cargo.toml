@@ -8,4 +8,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dllinject = { git = "https://github.com/amrbashir/dllinject" }
+wincode = { version = "0.4", features = ["derive"] }
 windows = { workspace = true }

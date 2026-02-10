@@ -1,59 +1,169 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::ops::Deref;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Win32::Foundation::*;
 use windows::Win32::Storage::FileSystem::{FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW};
 use windows::Win32::System::LibraryLoader::*;
-use windows::Win32::System::Threading::*;
-use windows::core::PWSTR;
+use windows::Win32::System::Memory::*;
+use windows::core::PCWSTR;
 
-pub const PROTECTED_PATH: &str = r"test\secret.txt";
+const SANDBOX_MMF_PREFIX: &str = "Local\\SandboxDenyConfig";
 
-pub fn is_protected_path(path: &str) -> bool {
-    path.ends_with(PROTECTED_PATH)
+#[derive(Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead)]
+pub struct DenyConfig {
+    pub paths: Vec<String>,
 }
 
-pub fn check_and_deny(path: &str, api_name: &str) -> bool {
-    if is_protected_path(path) {
-        eprintln!("[HOOK:{}] Denying access to {}", api_name, path);
-        return true;
-    }
-    false
+// Static cache for deny config - initialized on first use, not during DllMain
+static DENY_CONFIG: OnceLock<DenyConfig> = OnceLock::new();
+
+pub fn init_deny_config() {
+    let Ok(config) = load_deny_config() else {
+        return;
+    };
+
+    let _ = DENY_CONFIG.set(config);
 }
 
-pub fn get_path_from_handle(handle: HANDLE) -> String {
-    let mut buf = [0u16; MAX_PATH as _];
-    let result = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) };
-    if result == 0 {
-        // Not a file handle or error - return empty string
-        return String::new();
-    }
-    decode_wide(&buf).to_string_lossy().into()
-}
-
-pub fn get_path_from_object_attrs(obj_attr: *mut OBJECT_ATTRIBUTES) -> String {
-    let mut buf = [0u16; MAX_PATH as _];
-    unsafe {
-        if !obj_attr.is_null() && !(*obj_attr).ObjectName.is_null() {
-            let name = &*(*obj_attr).ObjectName;
-            let len = (name.Length / 2) as usize;
-            if len > 0 && len < MAX_PATH as usize {
-                std::slice::from_raw_parts(name.Buffer.as_ptr(), len)
-                    .iter()
-                    .enumerate()
-                    .for_each(|(i, &c)| buf[i] = c);
-            }
+/// Get the denied paths from the deny config (for propagating to child processes)
+/// Returns empty slice if config not loaded (fail-open behavior)
+pub fn get_denied_paths() -> &'static [String] {
+    match DENY_CONFIG.get() {
+        Some(config) => &config.paths,
+        None => {
+            // Config not loaded - return empty slice (fail-open)
+            &[]
         }
     }
-    decode_wide(&buf).to_string_lossy().into()
 }
 
-pub fn inject_dll(process: Process, hinstance: HINSTANCE) -> windows::core::Result<()> {
+pub fn is_path_denied(path: &str) -> bool {
+    let deny = get_denied_paths();
+
+    // Ignore empty paths
+    if path.is_empty() {
+        return false;
+    }
+
+    // Check for exact match against denied paths
+    // Note: We don't canonicalize here because this function is called from file hooks,
+    // and canonicalize would trigger file operations, causing infinite recursion.
+    // The deny paths should already be canonicalized when the config is loaded.
+    deny.iter().any(|denied| {
+        if denied.is_empty() {
+            return false;
+        }
+        path.ends_with(denied) || denied.ends_with(path)
+    })
+}
+
+pub fn create_deny_config(pid: u32, paths: &[PathBuf]) -> windows::core::Result<HANDLE> {
+    // Convert PathBuf slice to String vector for serialization
+    let config = DenyConfig {
+        paths: paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+    };
+
+    // Serialize data
+    let bytes = wincode::serialize(&config).map_err(|e| {
+        windows::core::Error::new(
+            windows::core::HRESULT(E_FAIL.0),
+            format!("Failed to serialize deny config: {e}"),
+        )
+    })?;
+
+    let data_bytes = bytes.len();
+    let total_size = 8 + data_bytes; // 8 bytes for length prefix + data
+
+    // Create shared memory file mapping with unique name based on child PID
+    let name = encode_wide(format!("{SANDBOX_MMF_PREFIX}_{pid}"));
+    let mapping = unsafe {
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            None,
+            PAGE_READWRITE,
+            0,
+            total_size as u32,
+            PCWSTR(name.as_ptr()),
+        )?
+    };
+
+    // Create a writeable view to copy data into
+    let view = unsafe { MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, 0) };
+    if view.Value.is_null() {
+        unsafe { CloseHandle(mapping).ok() };
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT(E_FAIL.0),
+            "Failed to map view of file",
+        ));
+    }
+
+    unsafe {
+        // Write 8-byte length prefix (u64)
+        let len_prefix = data_bytes as u64;
+        let len_bytes = len_prefix.to_le_bytes();
+        std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), view.Value as *mut u8, 8);
+
+        // Write data at offset 8
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), (view.Value as *mut u8).add(8), data_bytes);
+
+        // Unmap view but keep handle open so memory stays valid for child process
+        let _ = UnmapViewOfFile(view);
+    }
+
+    Ok(mapping)
+}
+
+fn load_deny_config() -> windows::core::Result<DenyConfig> {
+    // Open the shared memory mapping for this process's PID
+    let name = encode_wide(format!("{SANDBOX_MMF_PREFIX}_{}", std::process::id()));
+    let mapping = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(name.as_ptr()))? };
+
+    // Create a read-only view to access the data
+    let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) };
+    if view.Value.is_null() {
+        unsafe { CloseHandle(mapping).ok() };
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT(E_FAIL.0),
+            "Failed to map view of file",
+        ));
+    }
+
+    unsafe {
+        // Read 8-byte length prefix
+        let mut len_bytes = [0u8; 8];
+        std::ptr::copy_nonoverlapping(view.Value as *const u8, len_bytes.as_mut_ptr(), 8);
+        let data_len = u64::from_le_bytes(len_bytes) as usize;
+
+        // Get pointer to data at offset 8
+        let data_ptr = (view.Value as *const u8).add(8);
+
+        // Create a slice of the data
+        let data_slice = std::slice::from_raw_parts(data_ptr, data_len);
+
+        // Deserialize config
+        let deny = wincode::deserialize(data_slice).map_err(|_e| {
+            windows::core::Error::new(
+                windows::core::HRESULT(E_FAIL.0),
+                "Failed to deserialize deny config",
+            )
+        })?;
+
+        let _ = UnmapViewOfFile(view);
+        let _ = CloseHandle(mapping);
+
+        Ok(deny)
+    }
+}
+
+pub fn inject_dll(hprocess: HANDLE, hinstance: HINSTANCE) -> windows::core::Result<()> {
     let current_module = get_current_module_path(hinstance)?;
     let current_module_dir = current_module.parent().unwrap();
 
@@ -63,79 +173,60 @@ pub fn inject_dll(process: Process, hinstance: HINSTANCE) -> windows::core::Resu
     let dll_path_32 = encode_wide(dll_path_32);
     let dll_path_64 = encode_wide(dll_path_64);
 
-    unsafe { dllinject::InjectDll((*process).0, dll_path_32.as_ptr(), dll_path_64.as_ptr()) };
+    let result =
+        unsafe { dllinject::InjectDll(hprocess.0, dll_path_32.as_ptr(), dll_path_64.as_ptr()) };
+    if result != 0 {
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT(result as _),
+            format!("DLL injection failed with error code: {result}"),
+        ));
+    }
 
     Ok(())
 }
 
-#[unsafe(no_mangle)]
 fn get_current_module_path(hinstance: HINSTANCE) -> windows::core::Result<PathBuf> {
-    unsafe {
-        let mut path_buf = vec![0u16; 260];
-        GetModuleFileNameW(Some(HMODULE(hinstance.0)), &mut path_buf);
+    let mut buf = vec![0u16; MAX_PATH as usize];
 
-        let path = String::from_utf16_lossy(&path_buf);
-        Ok(PathBuf::from(path))
+    let result = unsafe { GetModuleFileNameW(Some(HMODULE(hinstance.0)), &mut buf) };
+    if result == 0 {
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT(E_FAIL.0),
+            "Failed to get module file name",
+        ));
     }
+
+    let path = String::from_utf16_lossy(&buf);
+    Ok(PathBuf::from(path))
 }
 
-pub struct Process {
-    handle: HANDLE,
-    close_on_drop: bool,
+pub fn get_path_from_handle(handle: HANDLE) -> String {
+    let mut buf = [0u16; MAX_PATH as _];
+
+    let result = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) };
+    if result == 0 {
+        return String::new();
+    }
+
+    decode_wide(&buf).to_string_lossy().into_owned()
 }
 
-unsafe impl Send for Process {}
-unsafe impl Sync for Process {}
-
-impl Process {
-    pub fn open(pid: u32) -> windows::core::Result<Process> {
-        let process = unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid) }?;
-        let process = Process {
-            handle: process,
-            close_on_drop: true,
-        };
-        Ok(process)
+pub fn get_path_from_object_attrs(obj_attr: *mut OBJECT_ATTRIBUTES) -> String {
+    if obj_attr.is_null() || unsafe { (*obj_attr).ObjectName.is_null() } {
+        return String::new();
     }
 
-    pub fn from_raw_handle(handle: HANDLE) -> Process {
-        Process {
-            handle,
-            close_on_drop: false,
-        }
+    let mut buf = [0u16; MAX_PATH as _];
+
+    let name = unsafe { &*(*obj_attr).ObjectName };
+    let len = (name.Length / 2) as usize;
+    if len <= 0 || len > MAX_PATH as usize {
+        return String::new();
     }
 
-    pub fn exe_path(&self) -> windows::core::Result<String> {
-        let mut buf = vec![0u16; 260];
-        let mut size = buf.len() as u32;
+    unsafe { std::ptr::copy_nonoverlapping(name.Buffer.0, buf.as_mut_ptr(), len) };
 
-        unsafe {
-            QueryFullProcessImageNameW(
-                self.handle,
-                PROCESS_NAME_WIN32,
-                PWSTR(buf.as_mut_ptr()),
-                &mut size,
-            )
-        }?;
-
-        let path = String::from_utf16_lossy(&buf[..size as usize]);
-        Ok(path)
-    }
-}
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        if self.close_on_drop {
-            let _ = unsafe { CloseHandle(self.handle) };
-        }
-    }
-}
-
-impl Deref for Process {
-    type Target = HANDLE;
-
-    fn deref(&self) -> &Self::Target {
-        &self.handle
-    }
+    decode_wide(&buf).to_string_lossy().into_owned()
 }
 
 pub fn encode_wide(string: impl AsRef<OsStr>) -> Vec<u16> {
