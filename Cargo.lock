@@ -213,7 +213,7 @@ dependencies = [
 [[package]]
 name = "dllinject"
 version = "0.0.0"
-source = "git+https://github.com/amrbashir/dllinject#444c816507de19774c57929288950f0000672d09"
+source = "git+https://github.com/amrbashir/dllinject?rev=444c816507de19774c57929288950f0000672d09#444c816507de19774c57929288950f0000672d09"
 dependencies = [
  "cc",
 ]
@@ -300,7 +300,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 [[package]]
 name = "minhook-detours"
 version = "0.0.0"
-source = "git+https://github.com/amrbashir/minhook-detours-rs#38d42ed2c85fcd526aed57670b1c9d946008c70a"
+source = "git+https://github.com/amrbashir/minhook-detours-rs?rev=f087161dc2a3c4a516a556d7f9227e960dae0061#f087161dc2a3c4a516a556d7f9227e960dae0061"
 dependencies = [
  "bindgen",
  "cc",
@@ -413,6 +413,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "minhook-detours",
+ "pastey",
  "shared",
  "windows",
 ]

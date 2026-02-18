@@ -9,5 +9,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1.0"
 shared = { path = "../shared" }
-minhook-detours = { git = "https://github.com/amrbashir/minhook-detours-rs" }
+minhook-detours = { git = "https://github.com/amrbashir/minhook-detours-rs", rev = "f087161dc2a3c4a516a556d7f9227e960dae0061" }
 windows = { workspace = true }
+pastey = "0.2.1"

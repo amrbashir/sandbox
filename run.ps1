@@ -23,7 +23,10 @@ icacls "$SANDBOX_DIR/sandbox_hooks_32.dll" /grant *S-1-15-2-2:RX
 # Run the sandbox
 # cargo run --bin sandbox -- --deny ./test/secret.txt coreutils.exe cat ./test/secret.txt
 # cargo run --bin sandbox -- --deny ./test/secret.txt powershell.exe -Command  coreutils.exe cat ./test/secret.txt
-cargo run --bin sandbox -- --deny ./test/secret.txt cat.exe ./test/secret.txt
+# cargo run --bin sandbox -- --deny ./test/secret.txt cat.exe ./test/secret.txt
 # cargo run --bin sandbox -- --deny ./test/secret.txt powershell.exe -Command cat.exe ./test/secret.txt
 # cargo run --bin sandbox -- --deny ./test/secret.txt notepad.exe ./test/secret.txt
-# cargo run --bin sandbox -- --deny ./test/secret.txt pwsh.exe
+cargo run --bin sandbox -- --deny ./test/secret.txt powershell.exe
+
+# Run the sandbox with a PTY
+# cargo run --bin sandbox-pty -- --deny ./test/secret.txt powershell.exe

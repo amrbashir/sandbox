@@ -2,10 +2,15 @@
 name = "sandbox"
 version = "0.0.0"
 edition = "2024"
+default-run = "sandbox"
 
 [[bin]]
 name = "sandbox"
 path = "src/main.rs"
+
+[[bin]]
+name = "sandbox-pty"
+path = "src/pty.rs"
 
 [dependencies]
 anyhow = "1.0"
